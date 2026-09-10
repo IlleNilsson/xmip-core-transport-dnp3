@@ -144,7 +144,8 @@ impl Segment {
 }
 
 /// `fragment` split into transport segments, each with its header, the
-/// sequence starting at `sequence`. An empty fragment is one empty segment.
+/// sequence starting at `sequence` and wrapping at sixty-four however many
+/// segments there are. An empty fragment is one empty segment.
 #[must_use]
 pub fn segments(fragment: &[u8], sequence: u8) -> Vec<Vec<u8>> {
     let pieces: Vec<&[u8]> = if fragment.is_empty() {
@@ -160,7 +161,7 @@ pub fn segments(fragment: &[u8], sequence: u8) -> Vec<Vec<u8>> {
             let header = Segment {
                 first: i == 0,
                 last: i + 1 == count,
-                sequence: (sequence + u8::try_from(i).unwrap_or(0)) & 0x3f,
+                sequence: next_sequence(sequence, i),
             };
             let mut out = Vec::with_capacity(piece.len() + 1);
             out.push(header.header());
@@ -168,6 +169,14 @@ pub fn segments(fragment: &[u8], sequence: u8) -> Vec<Vec<u8>> {
             out
         })
         .collect()
+}
+
+/// The sequence `steps` segments after `sequence`: six bits, wrapping. Found
+/// 2026-09-09 as `sequence + i` in a `u8`, which stopped counting at the
+/// 256th segment and closed every fragment over 63 750 bytes.
+#[must_use]
+pub fn next_sequence(sequence: u8, steps: usize) -> u8 {
+    u8::try_from((usize::from(sequence) + steps) % 64).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -243,5 +252,21 @@ mod tests {
         assert_eq!(last.sequence, 0, "wraps at 64");
         assert_eq!(pieces[2].len(), 2);
         assert_eq!(segments(&[], 3), vec![vec![0xc3]]);
+    }
+
+    #[test]
+    fn a_fragment_of_hundreds_of_segments_keeps_counting() {
+        let fragment = vec![7u8; MAX_SEGMENT * 300];
+        let pieces = segments(&fragment, 60);
+        assert_eq!(pieces.len(), 300);
+        for (i, pair) in pieces.windows(2).enumerate() {
+            let before = Segment::from_header(pair[0][0]);
+            let after = Segment::from_header(pair[1][0]);
+            assert_eq!(after.sequence, (before.sequence + 1) & 0x3f, "segment {i}");
+            assert!(!after.first, "segment {i}");
+        }
+        assert!(Segment::from_header(pieces[299][0]).last);
+        assert_eq!(next_sequence(60, 300), 40, "360 modulo 64");
+        assert_eq!(next_sequence(63, 1), 0);
     }
 }
