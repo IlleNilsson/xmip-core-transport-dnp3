@@ -99,7 +99,7 @@ impl Master {
     /// Where the outstation went away.
     pub fn send_fragment(&mut self, fragment: &[u8]) -> Result<()> {
         let segments = link::segments(fragment, self.sequence);
-        self.sequence = (self.sequence + u8::try_from(segments.len()).unwrap_or(0)) & 0x3f;
+        self.sequence = link::next_sequence(self.sequence, segments.len());
         for user_data in segments {
             let frame = Frame {
                 control: link::CONTROL_MASTER_DATA,
@@ -235,6 +235,30 @@ mod tests {
         let empty = outstation.next_fragment().expect("empty").expect("one");
         assert!(empty.bytes.is_empty());
         assert!(outstation.next_fragment().expect("closed").is_none());
+        master.join().expect("thread").expect("mastering");
+    }
+
+    #[test]
+    fn a_fragment_over_two_hundred_and_fifty_six_segments_comes_back_whole() {
+        let far_end = outstation();
+        let (listener, address) = far_end.bind().expect("binding");
+        let long: Vec<u8> = (0..70_000)
+            .map(|i| u8::try_from(i % 251).unwrap_or(0))
+            .collect();
+        let sent = long.clone();
+        let master = std::thread::spawn(move || {
+            let mut master = Dnp3Transport::new("127.0.0.1:0", 1, 1024)
+                .timing_out_after(Duration::from_secs(2))
+                .connect(&address)?;
+            master.send_fragment(&sent)?;
+            master.send_fragment(b"after")
+        });
+        let mut outstation = far_end.accept_one(&listener).expect("accepting");
+        let big = outstation.next_fragment().expect("big").expect("one");
+        assert_eq!(big.bytes, long);
+        let next = outstation.next_fragment().expect("next").expect("one");
+        assert_eq!(next.bytes, b"after");
+        assert!(next.origin_uri.ends_with("&seq=26"), "{}", next.origin_uri);
         master.join().expect("thread").expect("mastering");
     }
 
