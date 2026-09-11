@@ -28,6 +28,7 @@ use std::time::Duration;
 
 pub use link::{Frame, MAX_SEGMENT, Segment};
 use transport::error::{Result, classify, protocol_error};
+use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::{Arrived, Directions, Transport};
 
@@ -117,6 +118,7 @@ impl Master {
     }
 }
 
+#[derive(Clone)]
 pub struct Dnp3Transport {
     bind: String,
     source: u16,
@@ -201,12 +203,108 @@ impl Transport for Dnp3Transport {
     }
 }
 
+impl Dnp3Transport {
+    /// Both ends on this machine: an ephemeral local port, the outstation at
+    /// link address 1024 spoken to by a master at 1, the loopback timeout on
+    /// either side.
+    #[must_use]
+    pub fn loopback() -> Self {
+        Self::new("127.0.0.1:0", 1024, 1).timing_out_after(LOOPBACK_TIMEOUT)
+    }
+}
+
+/// A bound outstation waiting for its one master and the one fragment it
+/// sends, however many segments it takes.
+struct Listening {
+    transport: Dnp3Transport,
+    listener: TcpListener,
+    address: String,
+}
+
+impl FarEnd for Listening {
+    fn address(&self) -> &str {
+        &self.address
+    }
+
+    fn take_one(self: Box<Self>) -> Result<Arrived> {
+        let mut outstation = self.transport.accept_one(&self.listener)?;
+        outstation
+            .next_fragment()?
+            .ok_or_else(|| protocol_error("the master closed without a fragment"))
+    }
+}
+
+/// A Stream travels as one fragment: the master speaks from the far end's
+/// destination to its source.
+impl Loopback for Dnp3Transport {
+    fn far_end(&self) -> Result<Box<dyn FarEnd>> {
+        let (listener, address) = self.bind()?;
+        Ok(Box::new(Listening {
+            transport: self.clone(),
+            listener,
+            address,
+        }))
+    }
+
+    fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
+        let mut master = Self::new("127.0.0.1:0", self.destination, self.source);
+        master.timeout = self.timeout;
+        master.send(address, payload)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn outstation() -> Dnp3Transport {
         Dnp3Transport::new("127.0.0.1:0", 1024, 1).timing_out_after(Duration::from_secs(2))
+    }
+
+    /// The shapes a protocol breaks on, as the Playground lists them.
+    fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
+        vec![
+            ("empty", Vec::new()),
+            ("one byte", vec![0x2a]),
+            ("every byte", (0..=255).collect()),
+            ("nul run", vec![0; 512]),
+            ("high bytes", vec![0xff; 512]),
+            ("crlf storm", b"\r\n".repeat(400)),
+        ]
+    }
+
+    #[test]
+    fn a_loopback_round_carries_a_stream_as_one_fragment() {
+        let loopback = Dnp3Transport::loopback();
+        let arrived = loopback.round(b"fragment").expect("round");
+        assert_eq!(arrived.bytes, b"fragment");
+        assert!(arrived.origin_uri.starts_with("dnp3://127.0.0.1:"));
+        assert!(arrived.origin_uri.ends_with("/1?destination=1024&seq=0"));
+        let long = vec![0x2a; 3000];
+        assert_eq!(
+            loopback.round(&long).expect("thirteen segments").bytes,
+            long
+        );
+        assert!(
+            loopback
+                .round(b"")
+                .expect("one empty segment")
+                .bytes
+                .is_empty()
+        );
+        assert!(loopback.ceiling().is_none());
+        assert!(loopback.refuses(&long).is_none());
+    }
+
+    #[test]
+    fn the_loopback_returns_the_edges_whole() {
+        let loopback = Dnp3Transport::loopback();
+        for (name, bytes) in edge_payloads() {
+            let arrived = loopback
+                .round(&bytes)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(arrived.bytes, bytes, "{name}");
+        }
     }
 
     #[test]
