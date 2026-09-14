@@ -28,6 +28,7 @@ use std::time::Duration;
 
 pub use link::{Frame, MAX_SEGMENT, Segment};
 use transport::error::{Result, classify, protocol_error};
+use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::{Arrived, Directions, Transport};
@@ -213,21 +214,9 @@ impl Dnp3Transport {
     }
 }
 
-/// A bound outstation waiting for its one master and the one fragment it
-/// sends, however many segments it takes.
-struct Listening {
-    transport: Dnp3Transport,
-    listener: TcpListener,
-    address: String,
-}
-
-impl FarEnd for Listening {
-    fn address(&self) -> &str {
-        &self.address
-    }
-
-    fn take_one(self: Box<Self>) -> Result<Arrived> {
-        let mut outstation = self.transport.accept_one(&self.listener)?;
+impl Accepting for Dnp3Transport {
+    fn take_one(&self, listener: &TcpListener) -> Result<Arrived> {
+        let mut outstation = self.accept_one(listener)?;
         outstation
             .next_fragment()?
             .ok_or_else(|| protocol_error("the master closed without a fragment"))
@@ -239,11 +228,7 @@ impl FarEnd for Listening {
 impl Loopback for Dnp3Transport {
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
         let (listener, address) = self.bind()?;
-        Ok(Box::new(Listening {
-            transport: self.clone(),
-            listener,
-            address,
-        }))
+        Ok(Box::new(Listening::new(self.clone(), listener, address)))
     }
 
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
@@ -256,21 +241,10 @@ impl Loopback for Dnp3Transport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use transport::payload::edge_payloads;
 
     fn outstation() -> Dnp3Transport {
         Dnp3Transport::new("127.0.0.1:0", 1024, 1).timing_out_after(Duration::from_secs(2))
-    }
-
-    /// The shapes a protocol breaks on, as the Playground lists them.
-    fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
-        vec![
-            ("empty", Vec::new()),
-            ("one byte", vec![0x2a]),
-            ("every byte", (0..=255).collect()),
-            ("nul run", vec![0; 512]),
-            ("high bytes", vec![0xff; 512]),
-            ("crlf storm", b"\r\n".repeat(400)),
-        ]
     }
 
     #[test]
