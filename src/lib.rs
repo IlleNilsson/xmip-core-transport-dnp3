@@ -215,7 +215,7 @@ impl Dnp3Transport {
 }
 
 impl Accepting for Dnp3Transport {
-    fn take_one(&self, listener: &TcpListener) -> Result<Arrived> {
+    fn take_one(self, listener: &TcpListener) -> Result<Arrived> {
         let mut outstation = self.accept_one(listener)?;
         outstation
             .next_fragment()?
@@ -227,8 +227,7 @@ impl Accepting for Dnp3Transport {
 /// destination to its source.
 impl Loopback for Dnp3Transport {
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
-        let (listener, address) = self.bind()?;
-        Ok(Box::new(Listening::new(self.clone(), listener, address)))
+        Ok(Box::new(Listening::new(self.clone(), self.bind()?)))
     }
 
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
