@@ -2,10 +2,11 @@
 //! bytes, a length, a control byte, destination and source, a CRC over
 //! that header, then user data in blocks of sixteen each with its own CRC
 //! — and the one-byte transport header that splits an application
-//! fragment across frames.
+//! fragment across frames. The CRC is CRC-16/DNP, codec's.
 
 use std::io::Read;
 
+use codec::crc::CRC_16_DNP;
 use transport::error::{Result, classify, protocol_error};
 
 /// The two start bytes.
@@ -29,23 +30,6 @@ pub struct Frame {
     pub user_data: Vec<u8>,
 }
 
-/// CRC-16/DNP over `bytes`: polynomial `0x3d65` reflected, complemented.
-#[must_use]
-pub fn crc(bytes: &[u8]) -> u16 {
-    let mut crc: u16 = 0;
-    for byte in bytes {
-        crc ^= u16::from(*byte);
-        for _ in 0..8 {
-            crc = if crc & 1 == 1 {
-                (crc >> 1) ^ 0xa6bc
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    !crc
-}
-
 /// Encode `frame`.
 ///
 /// # Errors
@@ -61,10 +45,10 @@ pub fn encode(frame: &Frame) -> Result<Vec<u8>> {
     header.extend_from_slice(&frame.destination.to_le_bytes());
     header.extend_from_slice(&frame.source.to_le_bytes());
     let mut out = header.clone();
-    out.extend_from_slice(&crc(&header).to_le_bytes());
+    out.extend_from_slice(&CRC_16_DNP.checksum(&header).to_le_bytes());
     for block in frame.user_data.chunks(16) {
         out.extend_from_slice(block);
-        out.extend_from_slice(&crc(block).to_le_bytes());
+        out.extend_from_slice(&CRC_16_DNP.checksum(block).to_le_bytes());
     }
     Ok(out)
 }
@@ -92,7 +76,7 @@ pub fn read(reader: &mut impl Read) -> Result<Option<Frame>> {
     if length < 5 {
         return Err(protocol_error("a length under five"));
     }
-    if crc(&header[..8]) != u16::from_le_bytes([header[8], header[9]]) {
+    if CRC_16_DNP.checksum(&header[..8]) != u16::from_le_bytes([header[8], header[9]]) {
         return Err(protocol_error("a header CRC that does not check"));
     }
     let mut user_data = Vec::with_capacity(length - 5);
@@ -103,7 +87,8 @@ pub fn read(reader: &mut impl Read) -> Result<Option<Frame>> {
         reader
             .read_exact(&mut block)
             .map_err(|e| classify("reading a data block", &e))?;
-        if crc(&block[..take]) != u16::from_le_bytes([block[take], block[take + 1]]) {
+        let check = u16::from_le_bytes([block[take], block[take + 1]]);
+        if CRC_16_DNP.checksum(&block[..take]) != check {
             return Err(protocol_error("a block CRC that does not check"));
         }
         user_data.extend_from_slice(&block[..take]);
@@ -188,7 +173,7 @@ mod tests {
         // IEEE 1815 gives 0x05 0x64 0x05 0xc0 0x01 0x00 0x00 0x04 as a
         // header with CRC 0xe9 0x21.
         assert_eq!(
-            crc(&[0x05, 0x64, 0x05, 0xc0, 0x01, 0x00, 0x00, 0x04]),
+            CRC_16_DNP.checksum(&[0x05, 0x64, 0x05, 0xc0, 0x01, 0x00, 0x00, 0x04]),
             u16::from_le_bytes([0xe9, 0x21])
         );
         let frame = Frame {
