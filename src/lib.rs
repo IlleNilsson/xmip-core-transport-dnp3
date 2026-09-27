@@ -31,7 +31,8 @@ use transport::error::{Result, classify, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Directions, Transport};
+use transport::{Arrived, Configured, Directions, Transport};
+use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 /// The outstation's side of one connection.
 pub struct Outstation {
@@ -204,6 +205,58 @@ impl Transport for Dnp3Transport {
     }
 }
 
+impl Configured for Dnp3Transport {
+    /// The address is where a Receive Location listens as the outstation —
+    /// `0.0.0.0:20000` the standard port; a Send Location connects as the
+    /// master to the target its route gives.
+    const SETTINGS: &'static Settings = &Settings {
+        technology: env!("CARGO_PKG_NAME"),
+        settings: &[
+            Setting {
+                name: "source",
+                kind: Kind::Integer {
+                    minimum: 0,
+                    maximum: 65_535,
+                },
+                presence: Presence::Required,
+                meaning: "The master's own link address, which its frames come from.",
+                applies: Applies::Send,
+            },
+            Setting {
+                name: "destination",
+                kind: Kind::Integer {
+                    minimum: 0,
+                    maximum: 65_535,
+                },
+                presence: Presence::Required,
+                meaning: "The outstation's link address, which the master's frames go to.",
+                applies: Applies::Send,
+            },
+            Setting {
+                name: "timeout",
+                kind: Kind::Duration,
+                presence: Presence::Optional,
+                meaning: "How long a peer that stops mid-frame is waited on; unbounded when \
+                          left out.",
+                applies: Applies::Both,
+            },
+        ],
+    };
+
+    fn configured(address: &str, settings: &Read) -> Result<Self> {
+        // An outstation reads no link address: it takes what a master sends.
+        let link = |name: &str| {
+            u16::try_from(settings.optional_integer(name).unwrap_or_default())
+                .map_err(|_| protocol_error(format!("a {name} link address over 16 bits")))
+        };
+        let transport = Self::new(address, link("source")?, link("destination")?);
+        Ok(match settings.optional_duration("timeout") {
+            Some(timeout) => transport.timing_out_after(timeout),
+            None => transport,
+        })
+    }
+}
+
 impl Dnp3Transport {
     /// Both ends on this machine: an ephemeral local port, the outstation at
     /// link address 1024 spoken to by a master at 1, the loopback timeout on
@@ -241,6 +294,30 @@ impl Loopback for Dnp3Transport {
 mod tests {
     use super::*;
     use transport::payload::edge_payloads;
+    use xcore::settings::Given;
+
+    #[test]
+    fn dnp3_declares_its_settings_and_reads_through_them() {
+        assert_eq!(Dnp3Transport::SETTINGS.problems(), Vec::<String>::new());
+        let given = [
+            ("source".to_string(), Given::Integer(1)),
+            ("destination".to_string(), Given::Integer(1024)),
+            ("timeout".to_string(), Given::Text("2s".to_string())),
+        ];
+        let master = Dnp3Transport::open("0.0.0.0:0", Applies::Send, &given).expect("master");
+        assert_eq!((master.source, master.destination), (1, 1024));
+        assert_eq!(master.timeout, Some(Duration::from_secs(2)));
+        assert!(Dnp3Transport::open("0.0.0.0:20000", Applies::Receive, &[]).is_ok());
+        let given = [("source".to_string(), Given::Integer(1))];
+        let Err(refused) = Dnp3Transport::open("0.0.0.0:0", Applies::Send, &given) else {
+            panic!("destination is required on a Send Location");
+        };
+        assert!(
+            refused.message.contains("\"destination\""),
+            "{}",
+            refused.message
+        );
+    }
 
     fn outstation() -> Dnp3Transport {
         Dnp3Transport::new("127.0.0.1:0", 1024, 1).timing_out_after(Duration::from_secs(2))
