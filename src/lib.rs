@@ -28,6 +28,7 @@ use std::time::Duration;
 
 pub use link::{Frame, MAX_SEGMENT, Segment};
 use transport::error::{Result, classify, protocol_error};
+use transport::kept::Kept;
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
@@ -126,6 +127,8 @@ pub struct Dnp3Transport {
     source: u16,
     destination: u16,
     timeout: Option<Duration>,
+    /// The listener the first receive binds, and every receive takes from.
+    receiving: Kept<TcpListener>,
 }
 
 impl Dnp3Transport {
@@ -138,6 +141,7 @@ impl Dnp3Transport {
             source,
             destination,
             timeout: None,
+            receiving: Kept::new(),
         }
     }
 
@@ -189,10 +193,11 @@ impl Transport for Dnp3Transport {
         Directions::BOTH
     }
 
-    /// One master's fragments until it closes.
+    /// One master's fragments until it closes, from the listener the first
+    /// receive bound and kept.
     fn receive(&self) -> Result<Vec<Arrived>> {
-        let (listener, _) = self.bind()?;
-        let mut outstation = self.accept_one(&listener)?;
+        let listener = self.receiving.bound(|| self.bind())?;
+        let mut outstation = self.accept_one(listener)?;
         let mut arrived = Vec::new();
         while let Some(fragment) = outstation.next_fragment()? {
             arrived.push(fragment);
@@ -295,6 +300,16 @@ mod tests {
     use super::*;
     use transport::payload::edge_payloads;
     use xcore::settings::Given;
+
+    #[test]
+    fn every_receive_takes_from_the_listener_the_first_bound() {
+        let receiver = Dnp3Transport::loopback();
+        receiver.receiving.bound(|| receiver.bind()).expect("bound");
+        let address = receiver.receiving.address().expect("address");
+        transport::kept::held_across_receives(&receiver, address, 5, |at, payload| {
+            Dnp3Transport::loopback().send_to(at, payload)
+        });
+    }
 
     #[test]
     fn dnp3_declares_its_settings_and_reads_through_them() {
