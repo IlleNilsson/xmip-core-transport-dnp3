@@ -19,7 +19,8 @@ pub const MAX_SEGMENT: usize = MAX_USER_DATA - 1;
 /// Primary-to-secondary unconfirmed user data, direction bit for a master.
 pub const CONTROL_MASTER_DATA: u8 = 0xc4;
 /// The same from an outstation.
-pub const CONTROL_OUTSTATION_DATA: u8 = 0x44;
+#[cfg(test)]
+const CONTROL_OUTSTATION_DATA: u8 = 0x44;
 
 /// One link frame.
 #[derive(Clone, Debug, PartialEq, Eq)]

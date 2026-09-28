@@ -48,7 +48,7 @@ impl Outstation {
     /// # Errors
     /// Where the connection broke, a segment came out of sequence, or a
     /// fragment began without its first segment.
-    pub fn next_fragment(&mut self) -> Result<Option<Arrived>> {
+    fn next_fragment(&mut self) -> Result<Option<Arrived>> {
         let mut fragment = Vec::new();
         let mut expected: Option<u8> = None;
         let mut origin = String::new();
@@ -101,7 +101,7 @@ impl Master {
     ///
     /// # Errors
     /// Where the outstation went away.
-    pub fn send_fragment(&mut self, fragment: &[u8]) -> Result<()> {
+    fn send_fragment(&mut self, fragment: &[u8]) -> Result<()> {
         let segments = link::segments(fragment, self.sequence);
         self.sequence = link::next_sequence(self.sequence, segments.len());
         for user_data in segments {
