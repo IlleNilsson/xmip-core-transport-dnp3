@@ -12,114 +12,42 @@
 //! fragment longer than a frame travels as transport segments, first to
 //! last, and is reassembled here.
 //!
-//! What is here is the link frame with its CRCs, unconfirmed user data,
-//! and the transport function over TCP. Link confirmation, the serial
-//! carrier through `xmip-core-transport-serial`, and secure authentication
-//! (IEEE 1815-2012 chapter 7) are the next layers.
+//! What is here is the link frame with its CRCs, unconfirmed and confirmed
+//! user data with the reset of link states, and the transport function over
+//! TCP. The serial carrier through `xmip-core-transport-serial`, and secure
+//! authentication (IEEE 1815-2012 chapter 7) are the next layers.
+//!
+//! **The master is answered after the whole receive cycle.** It sends a
+//! fragment's last segment as confirmed user data and waits for the link's
+//! answer, a secondary function code of IEEE 1815-2012 chapter 9: ACK on
+//! [`transport::Verdict::Accepted`]; `NOT_SUPPORTED`
+//! ([`link::CONTROL_NOT_SUPPORTED`], the link layer's one permanent answer)
+//! on [`transport::Verdict::Refused`], which it does not send again; NACK on
+//! [`transport::Verdict::Failed`], which it sends again. A master that sends
+//! unconfirmed user data waits for nothing, and such a fragment is
+//! at-most-once ([`outstation::AT_MOST_ONCE`]). Each fragment arrives whole,
+//! and the connection is kept for the master's next.
 //!
 //! The origin URI carries what the link knew:
 //! `dnp3://peer/1024?destination=1&seq=5`.
 
 pub mod link;
+pub mod master;
+pub mod outstation;
 
-use std::io::Write;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::time::Duration;
 
 pub use link::{Frame, MAX_SEGMENT, Segment};
-use transport::error::{Result, classify, protocol_error};
-use transport::kept::Kept;
+pub use master::Master;
+pub use outstation::{Fragment, Outstation};
+use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+use transport::serving::Serving;
 use transport::socket;
-use transport::{Arrived, Configured, Directions, Transport};
+use transport::{Arrived, Configured, Directions, Taken, Transport};
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
-
-/// The outstation's side of one connection.
-pub struct Outstation {
-    stream: TcpStream,
-    peer: SocketAddr,
-}
-
-impl Outstation {
-    /// The next application fragment, reassembled from its segments, or
-    /// `None` when the master closed.
-    ///
-    /// # Errors
-    /// Where the connection broke, a segment came out of sequence, or a
-    /// fragment began without its first segment.
-    fn next_fragment(&mut self) -> Result<Option<Arrived>> {
-        let mut fragment = Vec::new();
-        let mut expected: Option<u8> = None;
-        let mut origin = String::new();
-        loop {
-            let Some(frame) = link::read(&mut self.stream)? else {
-                if expected.is_some() {
-                    return Err(protocol_error("the master closed mid-fragment"));
-                }
-                return Ok(None);
-            };
-            let Some((header, data)) = frame.user_data.split_first() else {
-                continue;
-            };
-            let segment = Segment::from_header(*header);
-            match expected {
-                None if segment.first => {
-                    origin = format!(
-                        "dnp3://{}/{}?destination={}&seq={}",
-                        self.peer, frame.source, frame.destination, segment.sequence
-                    );
-                }
-                None => return Err(protocol_error("a segment with no fragment begun")),
-                Some(sequence) if sequence == segment.sequence && !segment.first => {}
-                Some(sequence) => {
-                    return Err(protocol_error(format!(
-                        "segment {} where {sequence} was expected",
-                        segment.sequence
-                    )));
-                }
-            }
-            fragment.extend_from_slice(data);
-            if segment.last {
-                return Ok(Some(Arrived::new(origin, fragment)));
-            }
-            expected = Some((segment.sequence + 1) & 0x3f);
-        }
-    }
-}
-
-/// The master's side of one connection.
-pub struct Master {
-    stream: TcpStream,
-    source: u16,
-    destination: u16,
-    sequence: u8,
-}
-
-impl Master {
-    /// Send `fragment` as one or more frames.
-    ///
-    /// # Errors
-    /// Where the outstation went away.
-    fn send_fragment(&mut self, fragment: &[u8]) -> Result<()> {
-        let segments = link::segments(fragment, self.sequence);
-        self.sequence = link::next_sequence(self.sequence, segments.len());
-        for user_data in segments {
-            let frame = Frame {
-                control: link::CONTROL_MASTER_DATA,
-                destination: self.destination,
-                source: self.source,
-                user_data,
-            };
-            self.stream
-                .write_all(&link::encode(&frame)?)
-                .map_err(|e| classify("writing a frame", &e))?;
-        }
-        self.stream
-            .flush()
-            .map_err(|e| classify("flushing the frames", &e))
-    }
-}
 
 #[derive(Clone)]
 pub struct Dnp3Transport {
@@ -127,8 +55,9 @@ pub struct Dnp3Transport {
     source: u16,
     destination: u16,
     timeout: Option<Duration>,
-    /// The listener the first receive binds, and every receive takes from.
-    receiving: Kept<TcpListener>,
+    /// The listener the first receive binds, and the masters' connections
+    /// kept open on it between their fragments.
+    receiving: Serving<Outstation>,
 }
 
 impl Dnp3Transport {
@@ -141,7 +70,7 @@ impl Dnp3Transport {
             source,
             destination,
             timeout: None,
-            receiving: Kept::new(),
+            receiving: Serving::new(),
         }
     }
 
@@ -166,7 +95,7 @@ impl Dnp3Transport {
     /// Where the connection could not be accepted.
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Outstation> {
         let (stream, peer) = socket::accept_tcp(listener, self.timeout)?;
-        Ok(Outstation { stream, peer })
+        Ok(Outstation::new(stream, peer))
     }
 
     /// Connect to the outstation at `target` as the master.
@@ -175,12 +104,7 @@ impl Dnp3Transport {
     /// Where the outstation refused or could not be reached.
     pub fn connect(&self, target: &str) -> Result<Master> {
         let stream = socket::connect_tcp(target, self.timeout)?;
-        Ok(Master {
-            stream,
-            source: self.source,
-            destination: self.destination,
-            sequence: 0,
-        })
+        Ok(Master::new(stream, self.source, self.destination))
     }
 }
 
@@ -193,16 +117,23 @@ impl Transport for Dnp3Transport {
         Directions::BOTH
     }
 
-    /// One master's fragments until it closes, from the listener the first
-    /// receive bound and kept.
+    fn arrivals(&self) -> transport::Arrivals {
+        transport::Arrivals::Ordered("a link's frames are confirmed in sequence")
+    }
+
+    /// The next fragment from whichever master sends first, on the listener
+    /// the first receive bound and kept, whole. A master that sent it
+    /// confirmed waits for the link's answer until the receive cycle has
+    /// ended: ACK on accepted, NACK on refused. One sent unconfirmed is
+    /// at-most-once ([`outstation::AT_MOST_ONCE`]).
     fn receive(&self) -> Result<Vec<Arrived>> {
-        let listener = self.receiving.bound(|| self.bind())?;
-        let mut outstation = self.accept_one(listener)?;
-        let mut arrived = Vec::new();
-        while let Some(fragment) = outstation.next_fragment()? {
-            arrived.push(fragment);
-        }
-        Ok(arrived)
+        let arrived = self.receiving.next(
+            || self.bind(),
+            self.timeout,
+            |stream, peer| Ok(Outstation::new(stream, peer)),
+            Outstation::turn,
+        )?;
+        Ok(vec![arrived])
     }
 
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
@@ -273,11 +204,12 @@ impl Dnp3Transport {
 }
 
 impl Accepting for Dnp3Transport {
-    fn take_one(self, listener: &TcpListener) -> Result<Arrived> {
+    fn take_one(self, listener: &TcpListener) -> Result<Taken> {
         let mut outstation = self.accept_one(listener)?;
         outstation
-            .next_fragment()?
-            .ok_or_else(|| protocol_error("the master closed without a fragment"))
+            .next_arrival()?
+            .ok_or_else(|| protocol_error("the master closed without a fragment"))?
+            .taken()
     }
 }
 
@@ -298,17 +230,86 @@ impl Loopback for Dnp3Transport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::net::TcpStream;
     use transport::payload::edge_payloads;
     use xcore::settings::Given;
 
     #[test]
     fn every_receive_takes_from_the_listener_the_first_bound() {
         let receiver = Dnp3Transport::loopback();
-        receiver.receiving.bound(|| receiver.bind()).expect("bound");
-        let address = receiver.receiving.address().expect("address");
-        transport::kept::held_across_receives(&receiver, address, 5, |at, payload| {
+        let address = receiver
+            .receiving
+            .bound(|| receiver.bind())
+            .expect("bound")
+            .to_string();
+        transport::kept::held_across_receives(&receiver, &address, 5, |at, payload| {
             Dnp3Transport::loopback().send_to(at, payload)
         });
+    }
+
+    #[test]
+    fn a_fragment_is_answered_not_supported_when_refused_nack_when_failed_then_ack() {
+        let receiver = Dnp3Transport::loopback();
+        let address = receiver
+            .receiving
+            .bound(|| receiver.bind())
+            .expect("bound")
+            .to_string();
+        let master = std::thread::spawn(move || {
+            let mut master = Dnp3Transport::new("127.0.0.1:0", 1, 1024)
+                .timing_out_after(LOOPBACK_TIMEOUT)
+                .connect(&address)?;
+            let refused = master.send_fragment(b"R1").expect_err("NOT_SUPPORTED");
+            let failed = master.send_fragment(b"C1").expect_err("NACK");
+            master.send_fragment(b"C1")?;
+            Ok::<_, transport::TransportError>((refused, failed))
+        });
+        let first = receiver.receive().expect("first").remove(0);
+        assert!(first.defers(), "the master waits for the link's answer");
+        first
+            .refused(transport::Refusal::Unacceptable)
+            .expect("refused");
+        let second = receiver.receive().expect("second").remove(0);
+        second.failed().expect("failed");
+        let again = receiver.receive().expect("again, on the kept connection");
+        let again = again.into_iter().next().expect("one").taken().expect("ACK");
+        assert_eq!(again.bytes, b"C1");
+        let (refused, failed) = master.join().expect("thread").expect("acknowledged");
+        assert!(!refused.retryable, "{refused}");
+        assert!(refused.message.contains("NOT_SUPPORTED"), "{refused}");
+        assert!(failed.retryable, "{failed}");
+        assert!(failed.message.contains("NACK"), "{failed}");
+    }
+
+    #[test]
+    fn unconfirmed_user_data_is_at_most_once() {
+        let far_end = outstation();
+        let (listener, address) = far_end.bind().expect("binding");
+        let sender = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).expect("connecting");
+            let frame = Frame {
+                control: link::CONTROL_MASTER_DATA,
+                destination: 1024,
+                source: 1,
+                user_data: vec![0xc0, 7],
+            };
+            stream
+                .write_all(&link::encode(&frame).expect("encode"))
+                .expect("writing");
+        });
+        let mut outstation = far_end.accept_one(&listener).expect("accepting");
+        let arrived = outstation.next_arrival().expect("read").expect("one");
+        assert!(!arrived.defers(), "nobody waits for unconfirmed data");
+        assert_eq!(arrived.taken().expect("taken").bytes, [7]);
+        sender.join().expect("thread");
+    }
+
+    /// The next fragment on `outstation`, accepted: the master is answered
+    /// ACK.
+    fn accepted(outstation: &mut Outstation) -> Option<Taken> {
+        let arrived = outstation.next_arrival().expect("read")?;
+        Some(arrived.taken().expect("accepted"))
     }
 
     #[test]
@@ -389,15 +390,15 @@ mod tests {
             master.send_fragment(&[])
         });
         let mut outstation = far_end.accept_one(&listener).expect("accepting");
-        let read = outstation.next_fragment().expect("read").expect("one");
+        let read = accepted(&mut outstation).expect("one");
         assert_eq!(read.bytes, [0xc0, 0x01, 0x3c, 0x02, 0x06]);
         assert!(read.origin_uri.ends_with("/1?destination=1024&seq=0"));
-        let big = outstation.next_fragment().expect("big").expect("one");
+        let big = accepted(&mut outstation).expect("big");
         assert_eq!(big.bytes, long);
         assert!(big.origin_uri.ends_with("&seq=1"));
-        let empty = outstation.next_fragment().expect("empty").expect("one");
+        let empty = accepted(&mut outstation).expect("empty");
         assert!(empty.bytes.is_empty());
-        assert!(outstation.next_fragment().expect("closed").is_none());
+        assert!(accepted(&mut outstation).is_none(), "closed");
         master.join().expect("thread").expect("mastering");
     }
 
@@ -417,9 +418,9 @@ mod tests {
             master.send_fragment(b"after")
         });
         let mut outstation = far_end.accept_one(&listener).expect("accepting");
-        let big = outstation.next_fragment().expect("big").expect("one");
+        let big = accepted(&mut outstation).expect("big");
         assert_eq!(big.bytes, long);
-        let next = outstation.next_fragment().expect("next").expect("one");
+        let next = accepted(&mut outstation).expect("next");
         assert_eq!(next.bytes, b"after");
         assert!(next.origin_uri.ends_with("&seq=26"), "{}", next.origin_uri);
         master.join().expect("thread").expect("mastering");
@@ -436,7 +437,7 @@ mod tests {
         });
         let mut outstation = far_end.accept_one(&listener).expect("accepting");
         let mut arrived = Vec::new();
-        while let Some(fragment) = outstation.next_fragment().expect("receiving") {
+        while let Some(fragment) = accepted(&mut outstation) {
             arrived.push(fragment);
         }
         sender.join().expect("thread").expect("sending");

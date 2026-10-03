@@ -18,6 +18,58 @@ pub const MAX_USER_DATA: usize = 250;
 pub const MAX_SEGMENT: usize = MAX_USER_DATA - 1;
 /// Primary-to-secondary unconfirmed user data, direction bit for a master.
 pub const CONTROL_MASTER_DATA: u8 = 0xc4;
+/// Primary-to-secondary reset of link states, from a master: the confirmed
+/// user data that follows counts its frame count bit from it.
+pub const CONTROL_MASTER_RESET: u8 = 0xc0;
+/// Primary-to-secondary confirmed user data from a master, the frame count
+/// valid bit set; the frame count bit ([`FCB`]) is each frame's own.
+pub const CONTROL_MASTER_CONFIRMED: u8 = 0xd3;
+/// The frame count bit, alternating from one confirmed frame to the next.
+pub const FCB: u8 = 0x20;
+/// Secondary-to-primary ACK, from an outstation: the frame was taken.
+pub const CONTROL_ACK: u8 = 0x00;
+/// Secondary-to-primary NACK, from an outstation: the frame was not taken,
+/// and the master sends it again.
+pub const CONTROL_NACK: u8 = 0x01;
+/// Secondary-to-primary `NOT_SUPPORTED`, secondary function code 15 (IEEE
+/// 1815-2012 chapter 9, the link layer's secondary function codes): the
+/// link service is not one this outstation gives the frame, and the master
+/// does not send it again — the link layer's one permanent answer, what an
+/// outstation answers a fragment it refused.
+pub const CONTROL_NOT_SUPPORTED: u8 = 0x0f;
+/// The primary bit: the frame begins an exchange rather than answering one.
+const PRIMARY: u8 = 0x40;
+/// The function in the low four bits of a control byte.
+const FUNCTION: u8 = 0x0f;
+
+/// What a primary frame asks of the secondary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Function {
+    /// Reset of link states: answered ACK at once.
+    Reset,
+    /// User data the master waits to see ACK or NACK.
+    Confirmed,
+    /// User data nobody answers.
+    Unconfirmed,
+    /// Anything else: a test of link states, a request for link status.
+    Other,
+}
+
+impl Function {
+    /// What `control` asks, where it is a primary frame.
+    #[must_use]
+    pub const fn of(control: u8) -> Self {
+        if control & PRIMARY == 0 {
+            return Self::Other;
+        }
+        match control & FUNCTION {
+            0 => Self::Reset,
+            3 => Self::Confirmed,
+            4 => Self::Unconfirmed,
+            _ => Self::Other,
+        }
+    }
+}
 /// The same from an outstation.
 #[cfg(test)]
 const CONTROL_OUTSTATION_DATA: u8 = 0x44;
