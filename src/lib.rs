@@ -41,6 +41,7 @@ use std::time::Duration;
 pub use link::{Frame, MAX_SEGMENT, Segment};
 pub use master::Master;
 pub use outstation::{Fragment, Outstation};
+use transport::ArrivalIdentity;
 use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
@@ -216,6 +217,10 @@ impl Accepting for Dnp3Transport {
 /// A Stream travels as one fragment: the master speaks from the far end's
 /// destination to its source.
 impl Loopback for Dnp3Transport {
+    fn arrival_identity(&self) -> ArrivalIdentity {
+        ArrivalIdentity::PEER
+    }
+
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
         Ok(Box::new(Listening::new(self.clone(), self.bind()?)))
     }
