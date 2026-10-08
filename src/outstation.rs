@@ -130,11 +130,10 @@ impl Outstation {
         } else {
             Acknowledgement::at_most_once(AT_MOST_ONCE)
         };
-        Ok(Some(Arrived::whole(
-            fragment.origin_uri,
-            fragment.bytes,
-            acknowledgement,
-        )))
+        Ok(Some(
+            Arrived::whole(fragment.origin_uri, fragment.bytes, acknowledgement)
+                .from_peer(self.peer),
+        ))
     }
 
     /// One turn for a kept listener: the next arrival, or the master gone.
