@@ -122,6 +122,10 @@ impl Transport for Dnp3Transport {
         transport::Arrivals::Ordered("a link's frames are confirmed in sequence")
     }
 
+    fn waiting(&self) -> transport::Waiting {
+        transport::Waiting::Waits("the listener waits for a master's fragment")
+    }
+
     /// The next fragment from whichever master sends first, on the listener
     /// the first receive bound and kept, whole. A master that sent it
     /// confirmed waits for the link's answer until the receive cycle has
