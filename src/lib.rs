@@ -360,12 +360,9 @@ mod tests {
             loopback.round(&long).expect("thirteen segments").bytes,
             long
         );
-        assert!(
-            loopback
-                .round(b"")
-                .expect("one empty segment")
-                .bytes
-                .is_empty()
+        assert_eq!(
+            loopback.round(b"").expect("one empty segment").bytes,
+            [] as [u8; 0]
         );
         assert!(loopback.ceiling().is_none());
         assert!(loopback.refuses(&long).is_none());
@@ -406,7 +403,7 @@ mod tests {
         assert_eq!(big.bytes, long);
         assert!(big.origin_uri.ends_with("&seq=1"));
         let empty = accepted(&mut outstation).expect("empty");
-        assert!(empty.bytes.is_empty());
+        assert_eq!(empty.bytes, [] as [u8; 0]);
         assert!(accepted(&mut outstation).is_none(), "closed");
         master.join().expect("thread").expect("mastering");
     }
