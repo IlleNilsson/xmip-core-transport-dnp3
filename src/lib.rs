@@ -131,7 +131,7 @@ impl Transport for Dnp3Transport {
     /// confirmed waits for the link's answer until the receive cycle has
     /// ended: ACK on accepted, NACK on refused. One sent unconfirmed is
     /// at-most-once ([`outstation::AT_MOST_ONCE`]).
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
         let arrived = self.receiving.next(
             || self.bind(),
             self.timeout,
@@ -141,7 +141,12 @@ impl Transport for Dnp3Transport {
         Ok(vec![arrived])
     }
 
-    fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Gathered("one DNP3 application fragment carries the whole body")
+    }
+
+    fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
+        let bytes: &[u8] = &outgoing.gather()?;
         self.connect(target)?.send_fragment(bytes)
     }
 }
