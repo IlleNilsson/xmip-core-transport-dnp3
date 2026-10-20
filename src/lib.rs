@@ -6,7 +6,7 @@
 //! contract's.
 //!
 //! DNP3 is the utility SCADA protocol, IEEE 1815: an outstation in the
-//! field, a master in the control centre, over TCP on port 20000 or a
+//! field, a master in the control center, over TCP on port 20000 or a
 //! serial line. A Receive Location listens as the outstation and hands each
 //! fragment up; a Send Location connects as the master and sends one. A
 //! fragment longer than a frame travels as transport segments, first to
