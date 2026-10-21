@@ -20,7 +20,10 @@ Receive Location keeps the masters' connections open between their fragments
 (`transport::serving::Serving`), taking the next fragment from whichever sends
 first; until 2026-10-02 a receive read one master's fragments until it closed.
 The confirmed last segment adds one link round trip per fragment, and the
-reset one per connection.
+reset one per connection. A Send Location keeps its connection to each
+outstation (`transport::Pool`), so the reset is once, fragment after fragment,
+and a NACK or `NOT_SUPPORTED` fails the send without letting the connection
+go; until 2026-10-21 every send connected and reset the link of its own.
 
 ## Toolchain
 

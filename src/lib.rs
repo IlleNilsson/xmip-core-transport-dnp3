@@ -26,7 +26,9 @@
 //! [`transport::Verdict::Failed`], which it sends again. A master that sends
 //! unconfirmed user data waits for nothing, and such a fragment is
 //! at-most-once ([`outstation::AT_MOST_ONCE`]). Each fragment arrives whole,
-//! and the connection is kept for the master's next.
+//! and the connection is kept for the master's next. A Send Location keeps
+//! its connection too, one per outstation, its link states reset once
+//! ([`master`]); until 2026-10-21 every send connected of its own.
 //!
 //! The origin URI carries what the link knew:
 //! `dnp3://peer/1024?destination=1&seq=5`.
@@ -42,6 +44,7 @@ pub use link::{Frame, MAX_SEGMENT, Segment};
 pub use master::Master;
 pub use outstation::{Fragment, Outstation};
 use transport::ArrivalIdentity;
+use transport::Pool;
 use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
@@ -56,6 +59,8 @@ pub struct Dnp3Transport {
     source: u16,
     destination: u16,
     timeout: Option<Duration>,
+    /// The connection kept to each outstation, shared by every clone.
+    masters: Pool<Master>,
     /// The listener the first receive binds, and the masters' connections
     /// kept open on it between their fragments.
     receiving: Serving<Outstation>,
@@ -71,6 +76,7 @@ impl Dnp3Transport {
             source,
             destination,
             timeout: None,
+            masters: Pool::new(),
             receiving: Serving::new(),
         }
     }
@@ -145,9 +151,16 @@ impl Transport for Dnp3Transport {
         transport::Sending::Gathered("one DNP3 application fragment carries the whole body")
     }
 
+    /// One fragment on the connection kept to the outstation at `target`,
+    /// or on a new one whose link states are reset first. A NACK or a
+    /// `NOT_SUPPORTED` fails the send and keeps the connection.
     fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
         let bytes: &[u8] = &outgoing.gather()?;
-        self.connect(target)?.send_fragment(bytes)
+        self.masters.exchange(
+            target,
+            || self.connect(target),
+            |master| master.deliver(bytes),
+        )?
     }
 }
 
@@ -294,6 +307,52 @@ mod tests {
         assert!(refused.message.contains("NOT_SUPPORTED"), "{refused}");
         assert!(failed.retryable, "{failed}");
         assert!(failed.message.contains("NACK"), "{failed}");
+    }
+
+    #[test]
+    fn a_hundred_sends_to_one_outstation_open_one_connection_and_a_nack_keeps_it() {
+        // Until 2026-10-21 every send connected and reset the link of its
+        // own.
+        const ROUNDS: usize = 100;
+        let receiver = Dnp3Transport::loopback();
+        let address = receiver
+            .receiving
+            .bound(|| receiver.bind())
+            .expect("bound")
+            .to_string();
+        let sender = std::thread::spawn(move || {
+            let sender =
+                Dnp3Transport::new("127.0.0.1:0", 1, 1024).timing_out_after(LOOPBACK_TIMEOUT);
+            let shared = sender.clone();
+            let sent: Vec<Result<()>> = (0..ROUNDS)
+                .map(|round| {
+                    let by = if round % 2 == 0 { &sender } else { &shared };
+                    by.send(&address, format!("f{round}").as_bytes())
+                })
+                .collect();
+            (sent, sender.masters.opened())
+        });
+        let mut peers = std::collections::BTreeSet::new();
+        for round in 0..ROUNDS {
+            let arrived = receiver.receive().expect("received").remove(0);
+            if round == 1 {
+                arrived.failed().expect("NACK");
+                continue;
+            }
+            let taken = arrived.taken().expect("ACK");
+            assert_eq!(taken.bytes, format!("f{round}").as_bytes());
+            peers.insert(taken.origin_uri.split('/').nth(2).map(str::to_string));
+        }
+        let (sent, opened) = sender.join().expect("sender");
+        assert!(sent[1].as_ref().expect_err("NACK").retryable);
+        assert!(
+            sent.iter()
+                .enumerate()
+                .all(|(n, sent)| n == 1 || sent.is_ok())
+        );
+        assert_eq!(opened, 1, "one connection, the NACK's included");
+        assert_eq!(peers.len(), 1, "every fragment on the kept connection");
+        assert_eq!(receiver.receiving.open(), 1);
     }
 
     #[test]
