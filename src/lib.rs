@@ -202,6 +202,9 @@ impl Configured for Dnp3Transport {
         ],
     };
 
+    /// The schemes a Location's address is entered with to choose this technology.
+    const SCHEMES: &'static [&'static str] = &["dnp3"];
+
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         // An outstation reads no link address: it takes what a master sends.
         let link = |name: &str| {
