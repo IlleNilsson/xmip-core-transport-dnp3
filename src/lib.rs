@@ -45,6 +45,7 @@ pub use master::Master;
 pub use outstation::{Fragment, Outstation};
 use transport::ArrivalIdentity;
 use transport::Pool;
+use transport::deadline::Within;
 use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
@@ -102,7 +103,7 @@ impl Dnp3Transport {
     /// Where the connection could not be accepted.
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Outstation> {
         let (stream, peer) = socket::accept_tcp(listener, self.timeout)?;
-        Ok(Outstation::new(stream, peer))
+        Ok(Outstation::new(Within::new(stream), peer))
     }
 
     /// Connect to the outstation at `target` as the master.
@@ -221,6 +222,12 @@ impl Configured for Dnp3Transport {
             Some(timeout) => transport.timing_out_after(timeout),
             None => transport,
         })
+    }
+
+    /// Each master's turn on a Receive Location taking at most `turn`.
+    fn turning_within(mut self, turn: Duration) -> Self {
+        self.receiving = self.receiving.turning_within(turn);
+        self
     }
 }
 
