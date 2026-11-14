@@ -5,6 +5,7 @@ use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
 
 use transport::answer::Answer;
+use transport::deadline::Within;
 use transport::error::{Result, classify, protocol_error};
 use transport::serving::{Open, Turn};
 use transport::{Acknowledgement, Arrived, Verdict};
@@ -30,16 +31,16 @@ pub struct Fragment {
     confirm: Option<(u16, u16)>,
 }
 
-/// The outstation's side of one connection.
+/// The outstation's side of one connection, each read within its turn.
 pub struct Outstation {
-    stream: TcpStream,
+    stream: Within,
     peer: SocketAddr,
 }
 
 impl Outstation {
     /// A connection a master opened from `peer`.
     #[must_use]
-    pub const fn new(stream: TcpStream, peer: SocketAddr) -> Self {
+    pub const fn new(stream: Within, peer: SocketAddr) -> Self {
         Self { stream, peer }
     }
 
@@ -122,7 +123,7 @@ impl Outstation {
         };
         let acknowledgement = if fragment.confirm.is_some() {
             // Let go without a verdict, the connection is shut.
-            let held = Answer::held(&self.stream)?;
+            let held = Answer::held(self.stream.socket())?;
             let answered = fragment.clone();
             Acknowledgement::deferred(move |verdict| {
                 held.with(|stream| answer(stream, &answered, verdict))
@@ -155,11 +156,11 @@ impl Outstation {
 
 impl Open for Outstation {
     fn socket(&self) -> &TcpStream {
-        &self.stream
+        self.stream.socket()
     }
 }
 
-fn answer(stream: &mut TcpStream, fragment: &Fragment, verdict: Verdict) -> Result<()> {
+fn answer(stream: &mut impl Write, fragment: &Fragment, verdict: Verdict) -> Result<()> {
     let Some((master, outstation)) = fragment.confirm else {
         return Ok(());
     };
@@ -178,7 +179,7 @@ fn answer(stream: &mut TcpStream, fragment: &Fragment, verdict: Verdict) -> Resu
 }
 
 /// Answer the primary `frame` with the secondary `control`.
-fn write_link(stream: &mut TcpStream, frame: &Frame, control: u8) -> Result<()> {
+fn write_link(stream: &mut impl Write, frame: &Frame, control: u8) -> Result<()> {
     let reply = Frame {
         control,
         destination: frame.source,
@@ -188,7 +189,7 @@ fn write_link(stream: &mut TcpStream, frame: &Frame, control: u8) -> Result<()> 
     write_frame(stream, &reply)
 }
 
-fn write_frame(stream: &mut TcpStream, frame: &Frame) -> Result<()> {
+fn write_frame(stream: &mut impl Write, frame: &Frame) -> Result<()> {
     stream
         .write_all(&link::encode(frame)?)
         .map_err(|e| classify("writing the link answer", &e))?;
