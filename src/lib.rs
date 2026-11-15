@@ -82,13 +82,6 @@ impl Dnp3Transport {
         }
     }
 
-    /// Give up on a peer that stops mid-frame.
-    #[must_use]
-    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
     /// Bind and report the address actually assigned.
     ///
     /// # Errors
@@ -197,19 +190,21 @@ impl Configured for Dnp3Transport {
                 meaning: "The outstation's link address, which the master's frames go to.",
                 applies: Applies::Send,
             },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long a peer that stops mid-frame is waited on; unbounded when \
-                          left out.",
-                applies: Applies::Both,
-            },
+            transport::configured::timeout(
+                Applies::Both,
+                None,
+                "How long a peer that stops mid-frame is waited on; unbounded when \
+                 left out.",
+            ),
         ],
     };
 
     /// The schemes a Location's address is entered with to choose this technology.
     const SCHEMES: &'static [&'static str] = &["dnp3"];
+
+    fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
+        Some(&mut self.timeout)
+    }
 
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         // An outstation reads no link address: it takes what a master sends.
@@ -217,11 +212,7 @@ impl Configured for Dnp3Transport {
             u16::try_from(settings.optional_integer(name).unwrap_or_default())
                 .map_err(|_| protocol_error(format!("a {name} link address over 16 bits")))
         };
-        let transport = Self::new(address, link("source")?, link("destination")?);
-        Ok(match settings.optional_duration("timeout") {
-            Some(timeout) => transport.timing_out_after(timeout),
-            None => transport,
-        })
+        Ok(Self::new(address, link("source")?, link("destination")?))
     }
 
     /// Each master's turn on a Receive Location taking at most `turn`.
