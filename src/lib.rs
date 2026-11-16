@@ -62,7 +62,7 @@ pub struct Dnp3Transport {
     timeout: Option<Duration>,
     /// The connection kept to each outstation, shared by every clone.
     masters: Pool<Master>,
-    /// The listener the first receive binds, and the masters' connections
+    /// The listener its open binds, and the masters' connections
     /// kept open on it between their fragments.
     receiving: Serving<Outstation>,
 }
@@ -132,13 +132,12 @@ impl Transport for Dnp3Transport {
     }
 
     /// The next fragment from whichever master sends first, on the listener
-    /// the first receive bound and kept, whole. A master that sent it
+    /// its open bound and kept, whole. A master that sent it
     /// confirmed waits for the link's answer until the receive cycle has
     /// ended: ACK on accepted, NACK on refused. One sent unconfirmed is
     /// at-most-once ([`outstation::AT_MOST_ONCE`]).
     fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
         let arrived = self.receiving.next(
-            || self.bind(),
             self.timeout,
             |stream, peer| Ok(Outstation::new(stream, peer)),
             Outstation::turn,
@@ -225,6 +224,12 @@ impl Configured for Dnp3Transport {
     fn timed_by(mut self, clock: &std::sync::Arc<dyn xcore::Clock>) -> Self {
         self.receiving = self.receiving.timed_by(clock);
         self
+    }
+
+    /// The listener every receive takes from, bound where a Receive
+    /// Location listens for masters.
+    fn listening(&self) -> Result<Option<&str>> {
+        self.receiving.bound(|| self.bind()).map(Some)
     }
 }
 
