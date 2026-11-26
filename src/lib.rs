@@ -32,28 +32,54 @@
 //!
 //! The origin URI carries what the link knew:
 //! `dnp3://peer/1024?destination=1&seq=5`.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, and none of
+//! the code above, which is behind the default feature: what the surfaces'
+//! library carries (ADR-0064, amendment 2026-11-26).
 
+#[cfg(feature = "declaration")]
+pub mod declaration;
+#[cfg(feature = "default")]
 pub mod link;
+#[cfg(feature = "default")]
 pub mod master;
+#[cfg(feature = "default")]
 pub mod outstation;
 
+#[cfg(feature = "default")]
 use std::net::TcpListener;
+#[cfg(feature = "default")]
 use std::time::Duration;
 
+#[cfg(feature = "default")]
 pub use link::{Frame, MAX_SEGMENT, Segment};
+#[cfg(feature = "default")]
 pub use master::Master;
+#[cfg(feature = "default")]
 pub use outstation::{Fragment, Outstation};
+#[cfg(feature = "default")]
 use transport::ArrivalIdentity;
+#[cfg(feature = "default")]
 use transport::Pool;
+#[cfg(feature = "default")]
 use transport::deadline::Within;
+#[cfg(feature = "default")]
 use transport::error::{Result, protocol_error};
+#[cfg(feature = "default")]
 use transport::listening::{Accepting, Listening};
+#[cfg(feature = "default")]
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+#[cfg(feature = "default")]
 use transport::serving::Serving;
+#[cfg(feature = "default")]
 use transport::socket;
+#[cfg(feature = "default")]
 use transport::{Arrived, Configured, Directions, Taken, Transport};
-use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
+#[cfg(feature = "default")]
+use xcore::settings::{Read, Settings};
 
+#[cfg(feature = "default")]
 #[derive(Clone)]
 pub struct Dnp3Transport {
     bind: String,
@@ -67,6 +93,7 @@ pub struct Dnp3Transport {
     receiving: Serving<Outstation>,
 }
 
+#[cfg(feature = "default")]
 impl Dnp3Transport {
     /// Listen or connect at `bind`, `0.0.0.0:20000` being the standard
     /// port, as link address `source` speaking to `destination`.
@@ -109,6 +136,7 @@ impl Dnp3Transport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Transport for Dnp3Transport {
     fn name(&self) -> &'static str {
         "dnp3"
@@ -162,44 +190,10 @@ impl Transport for Dnp3Transport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Configured for Dnp3Transport {
-    /// The address is where a Receive Location listens as the outstation —
-    /// `0.0.0.0:20000` the standard port; a Send Location connects as the
-    /// master to the target its route gives.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            Setting {
-                name: "source",
-                kind: Kind::Integer {
-                    minimum: 0,
-                    maximum: 65_535,
-                },
-                presence: Presence::Required,
-                meaning: "The master's own link address, which its frames come from.",
-                applies: Applies::Send,
-            },
-            Setting {
-                name: "destination",
-                kind: Kind::Integer {
-                    minimum: 0,
-                    maximum: 65_535,
-                },
-                presence: Presence::Required,
-                meaning: "The outstation's link address, which the master's frames go to.",
-                applies: Applies::Send,
-            },
-            transport::configured::timeout(
-                Applies::Both,
-                None,
-                "How long a peer that stops mid-frame is waited on; unbounded when \
-                 left out.",
-            ),
-        ],
-    };
-
-    /// The schemes a Location's address is entered with to choose this technology.
-    const SCHEMES: &'static [&'static str] = &["dnp3"];
+    const SETTINGS: &'static Settings = declaration::SETTINGS;
+    const SCHEMES: &'static [&'static str] = declaration::SCHEMES;
 
     fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
         Some(&mut self.timeout)
@@ -233,6 +227,7 @@ impl Configured for Dnp3Transport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Dnp3Transport {
     /// Both ends on this machine: an ephemeral local port, the outstation at
     /// link address 1024 spoken to by a master at 1, the loopback timeout on
@@ -243,6 +238,7 @@ impl Dnp3Transport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Accepting for Dnp3Transport {
     fn take_one(self, listener: &TcpListener) -> Result<Taken> {
         let mut outstation = self.accept_one(listener)?;
@@ -255,6 +251,7 @@ impl Accepting for Dnp3Transport {
 
 /// A Stream travels as one fragment: the master speaks from the far end's
 /// destination to its source.
+#[cfg(feature = "default")]
 impl Loopback for Dnp3Transport {
     fn arrival_identity(&self) -> ArrivalIdentity {
         ArrivalIdentity::PEER
@@ -277,7 +274,7 @@ mod tests {
     use std::io::Write;
     use std::net::TcpStream;
     use transport::payload::edge_payloads;
-    use xcore::settings::Given;
+    use xcore::settings::{Applies, Given};
 
     #[test]
     fn every_receive_takes_from_the_listener_the_first_bound() {

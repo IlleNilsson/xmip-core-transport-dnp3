@@ -25,6 +25,10 @@ outstation (`transport::Pool`), so the reset is once, fragment after fragment,
 and a NACK or `NOT_SUPPORTED` fails the send without letting the connection
 go; until 2026-10-21 every send connected and reset the link of its own.
 
+## The declaration
+
+What a Location of this technology is configured with is two `const`s in its `declaration` module, `src/declaration.rs`, beside the code, which `Configured` reads (ADR-0064, amendment 2026-11-26): `declaration::SETTINGS`, `source`, `destination` and `timeout`, and `SCHEMES`, `dnp3`. Built with its `declaration` feature alone (`--no-default-features --features declaration`), the crate is those and nothing more: its code and every crate the code is built on — the estate's codec, for the link layer's CRC — are behind the default feature. So the library the surfaces load can carry it without the code, for the language server and the desktop to suggest and check a DNP3 Location's settings though no node in their process loaded the technology, once the gathering crate of open problem 48 links it. `test/Declaration.Test.ps1` in the estate holds that the declaration builds nothing the transport capability does not.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it
